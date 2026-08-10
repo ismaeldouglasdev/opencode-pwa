@@ -1,0 +1,18 @@
+# Credenciais — nunca commitar
+auth.local.json
+.env
+*.key
+cookies.txt
+secrets.json
+
+# Logs
+logs/
+proxy.log
+*.log
+
+# Node
+node_modules/
+
+# Sistema
+.DS_Store
+Thumbs.db

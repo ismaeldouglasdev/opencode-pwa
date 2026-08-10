@@ -1,0 +1,163 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="theme-color" content="#0d1117">
+  <title>OpenCode Monitor</title>
+  <link rel="manifest" href="manifest.json">
+  <link rel="stylesheet" href="style.css">
+  <script src="https://cdn.jsdelivr.net/npm/alpinejs@3.x.x/dist/cdn.min.js" defer></script>
+</head>
+<body>
+  <div x-data="app()" x-init="init()">
+    <div class="header">
+      <h1>⚡ OpenCode</h1>
+      <div class="header-actions">
+        <button @click="openNewSessionModal()" class="btn-primary">＋ Nova</button>
+        <button @click="showHome()" :class="view === 'home' ? 'btn-active' : ''">Atividade</button>
+        <button @click="showSessions()" :class="view === 'sessions' ? 'btn-active' : ''">Sessões</button>
+        <button @click="toggleLogs()" :class="logsOpen ? 'btn-active' : ''" title="Logs do frontend">📋 Logs</button>
+      </div>
+    </div>
+
+    <div x-show="error" class="error-banner" x-text="error"></div>
+    <div x-show="loading" class="loading">Carregando...</div>
+
+    <!-- ================= PAINEL DE LOGS ================= -->
+    <div class="logs-backdrop" x-show="logsOpen" x-cloak @click.self="logsOpen = false">
+      <div class="logs-panel">
+        <div class="logs-head">
+          <span>📋 Logs do frontend <span class="logs-count" x-text="logBuffer.length"></span></span>
+          <button @click="logsOpen = false" class="logs-close">✕</button>
+        </div>
+        <div class="logs-body" x-ref="logsBody">
+          <template x-for="entry in logBuffer" :key="entry.ts + entry.event">
+            <div class="log-entry" :class="'log-' + entry.level">
+              <span class="log-time" x-text="fmtLogTime(entry.ts)"></span>
+              <span class="log-event" x-text="entry.event"></span>
+              <span class="log-data" x-show="entry.data" x-text="JSON.stringify(entry.data)"></span>
+            </div>
+          </template>
+        </div>
+      </div>
+    </div>
+
+    <!-- ================= HOME: DASHBOARD DE ATIVIDADE AO VIVO ================= -->
+    <div x-show="view === 'home'" class="content">
+      <h2>🔴 Instâncias ativas (ao vivo)</h2>
+      <div class="live-feed">
+        <template x-for="session in sessions.filter(s => (Date.now() - (s.time?.updated || 0)) < 300000).slice(0, 8)" :key="session.id">
+          <div class="live-card-wrap" @click="openSessionById(session.id)">
+            <div x-html="liveCardHtml(live[session.id] || {
+              id: session.id,
+              title: session.title || session.id.slice(0, 16),
+              state: 'idle',
+              step: { agent: session.agent, model: session.model },
+              stale: false
+            })"></div>
+          </div>
+        </template>
+        <div x-show="sessions.filter(s => (Date.now() - (s.time?.updated || 0)) < 300000).length === 0" class="empty-state">
+          Nenhuma instância ativa agora. Abra o opencode no PC para ver aqui.
+        </div>
+      </div>
+      <h2 class="section-title">Todas as sessões recentes</h2>
+      <div class="list">
+        <template x-for="session in sessions.slice(0, 10)" :key="session.id">
+          <div class="item" @click="openSession(session)">
+            <div class="item-head">
+              <h3 x-text="session.title || session.id.slice(0, 20)"></h3>
+              <span class="item-badge" :class="sessionStatus(session).cls" x-text="sessionStatus(session).label"></span>
+            </div>
+            <p class="item-meta">
+              <span class="item-ago" x-text="fmtAgo(session.time?.updated)"></span>
+              <template x-if="session.agent"><span> · 🤖 <span x-text="session.agent"></span></span></template>
+              <template x-if="session.model"><span> · ⚡ <span x-text="fmtModel(session.model)"></span></span></template>
+            </p>
+          </div>
+        </template>
+      </div>
+    </div>
+
+    <!-- ================= SESSIONS ================= -->
+    <div x-show="view === 'sessions'" class="content">
+      <div class="section-head">
+        <h2>Sessões</h2>
+        <button @click="openNewSessionModal()" class="btn-primary">＋ Nova sessão</button>
+      </div>
+      <div class="list">
+        <template x-for="session in sessions.slice(0, 30)" :key="session.id">
+          <div class="item" @click="openSession(session)">
+            <div class="item-head">
+              <h3 x-text="session.title || session.id.slice(0, 20)"></h3>
+              <span class="item-badge" :class="sessionStatus(session).cls" x-text="sessionStatus(session).label"></span>
+            </div>
+            <p class="item-meta">
+              <span class="item-ago" x-text="fmtAgo(session.time?.updated)"></span>
+              <template x-if="session.agent"><span> · 🤖 <span x-text="session.agent"></span></span></template>
+              <template x-if="session.model"><span> · ⚡ <span x-text="fmtModel(session.model)"></span></span></template>
+            </p>
+          </div>
+        </template>
+      </div>
+    </div>
+
+    <!-- ================= SESSION: CHAT ================= -->
+    <div x-show="view === 'session'" class="content">
+      <div class="session-header">
+        <button @click="showHome()" class="back-btn">← Atividade</button>
+        <span x-text="currentSession ? (currentSession.title || currentSession.id.slice(0, 20)) : ''" class="session-title"></span>
+        <span class="item-badge" :class="currentSession ? sessionStatus(currentSession).cls : ''"
+              x-text="currentSession ? sessionStatus(currentSession).label : ''"></span>
+        <select class="model-select" x-model="selectedModel" @change="onModelChange()"
+                :disabled="!currentSession" title="Modelo para a próxima mensagem">
+          <option value="">⚡ Modelo padrão</option>
+          <template x-for="group in modelGroups" :key="group.provider">
+            <optgroup :label="group.label">
+              <template x-for="m in group.models" :key="m.id">
+                <option :value="m.value" x-text="m.label"></option>
+              </template>
+            </optgroup>
+          </template>
+        </select>
+      </div>
+
+      <!-- painel da resposta ao vivo (streaming) — logo abaixo da última mensagem -->
+      <div class="messages">
+        <template x-for="message in messages" :key="message.id">
+          <div class="message" :class="message.type">
+            <div class="msg-meta" x-text="message.type === 'user' ? 'você' : (message.agent || 'assistente')"></div>
+            <div class="msg-body" x-show="message.type === 'user'">
+              <div class="part part-text" x-text="renderUserMsg(message)"></div>
+            </div>
+            <div class="msg-body" x-show="message.type !== 'user'" x-html="renderAssistantMsg(message)"></div>
+          </div>
+        </template>
+        <div class="live-panel" x-show="currentSession && live[currentSession.id] && (live[currentSession.id].state !== 'idle' || live[currentSession.id].step)">
+          <div class="live-panel-label">⚡ resposta em tempo real</div>
+          <div x-html="currentSession && live[currentSession.id] ? liveCardHtml(live[currentSession.id]) : ''"></div>
+        </div>
+      </div>
+      <div class="input">
+        <input type="text" x-model="prompt" @keyup.enter="sendMessage()" placeholder="Enviar mensagem para esta instância...">
+        <button @click="sendMessage()" x-text="loading ? '...' : 'Enviar'"></button>
+      </div>
+    </div>
+
+    <!-- ================= MODAL: NOVA SESSÃO ================= -->
+    <div class="modal-backdrop" x-show="newSessionModal" x-cloak @click.self="newSessionModal = false">
+      <div class="modal">
+        <h3>Nova sessão</h3>
+        <input type="text" x-model="newSessionTitle" placeholder="Título (opcional)" @keyup.enter="createSession()">
+        <p class="modal-hint">A sessão é criada no diretório atual e abre automaticamente. Você pode definir o modelo depois pelo seletor no topo.</p>
+        <div class="modal-actions">
+          <button @click="newSessionModal = false" class="btn-ghost">Cancelar</button>
+          <button @click="createSession()" class="btn-primary" x-text="creating ? 'Criando...' : 'Criar'"></button>
+        </div>
+      </div>
+    </div>
+  </div>
+  <script src="app.js"></script>
+</body>
+</html>
