@@ -7,6 +7,7 @@
  * - Logging estruturado JSON em logs/server.log (níveis: debug|info|warn|error)
  */
 const http = require('http');
+const https = require('https');
 const fs = require('fs');
 const path = require('path');
 const os = require('os');
@@ -14,6 +15,13 @@ const os = require('os');
 const API_HOST = process.env.API_HOST || '127.0.0.1';
 const API_PORT = parseInt(process.env.API_PORT || '4333', 10);
 const PORT = parseInt(process.env.PORT || '4335', 10);
+
+// HTTPS opcional: HTTPS_CERT + HTTPS_KEY apontam para os arquivos do cert.
+// Sem eles, roda HTTP puro (comportamento atual). Para Tailscale, um
+// self-signed basta; para VPS público, use Let's Encrypt.
+const HTTPS_CERT = process.env.HTTPS_CERT || '';
+const HTTPS_KEY = process.env.HTTPS_KEY || '';
+const USE_HTTPS = !!(HTTPS_CERT && HTTPS_KEY);
 
 // ============================================================
 // NODES — multi-PC. Registro de upstreams de opencode serve.
@@ -204,10 +212,27 @@ function loadAuth() {
   console.error('[FATAL] Credenciais não encontradas. Defina OPENCODE_USERNAME/OPENCODE_PASSWORD ou crie auth.local.json');
   process.exit(1);
 }
-const AUTH = (() => {
+let AUTH = (() => {
   const { username, password } = loadAuth();
   return 'Basic ' + Buffer.from(`${username}:${password}`).toString('base64');
 })();
+
+// Rotação de credenciais sem restart: recarrega auth.local.json (SIGHUP).
+// Env vars continuam exigindo restart (systemd), mas o arquivo permite troca
+// a quente. Se o arquivo sumir/invalidar, mantém a credencial atual.
+function reloadAuth() {
+  const authFile = path.join(__dirname, 'auth.local.json');
+  try {
+    const data = JSON.parse(fs.readFileSync(authFile, 'utf8'));
+    if (data.username && data.password) {
+      AUTH = 'Basic ' + Buffer.from(`${data.username}:${data.password}`).toString('base64');
+      logger.info('auth.reloaded', { source: 'auth.local.json' });
+    }
+  } catch (e) {
+    logger.warn('auth.reload_failed', { message: e.message });
+  }
+}
+process.on('SIGHUP', reloadAuth);
 
 // ============================================================
 // LOGGER — JSON estruturado em logs/server.log
@@ -1030,7 +1055,7 @@ function replySessionMiss(res, code, msg) {
 // ============================================================
 // HTTP server
 // ============================================================
-const server = http.createServer(async (req, res) => {
+const requestHandler = async (req, res) => {
   const urlPath = req.url.split('?')[0];
   const method = req.method;
 
@@ -1446,14 +1471,18 @@ const server = http.createServer(async (req, res) => {
       res.end(content);
     }
   });
-});
+};
+
+const server = USE_HTTPS
+  ? https.createServer({ key: fs.readFileSync(HTTPS_KEY), cert: fs.readFileSync(HTTPS_CERT) }, requestHandler)
+  : http.createServer(requestHandler);
 
 server.listen(PORT, '0.0.0.0', () => {
   logger.info('server.start', {
-    port: PORT, api: `${API_HOST}:${API_PORT}`, pid: process.pid,
+    port: PORT, api: `${API_HOST}:${API_PORT}`, pid: process.pid, https: USE_HTTPS,
     nodes: NODES.map((n) => ({ id: n.id, name: n.name, color: n.color, base: n.base })),
   });
-  console.log(`PWA + proxy rodando em http://0.0.0.0:${PORT} (API -> ${API_HOST}:${API_PORT}, SSE streaming habilitado)`);
+  console.log(`PWA + proxy rodando em ${USE_HTTPS ? 'https' : 'http'}://0.0.0.0:${PORT} (API -> ${API_HOST}:${API_PORT}, SSE streaming habilitado)`);
   console.log(`Nodes registrados: ${NODES.map((n) => `${n.id}@${n.base}`).join('  ')}`);
   console.log(`Logs: ${LOG_FILE}`);
 });

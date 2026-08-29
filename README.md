@@ -82,7 +82,40 @@ curl http://127.0.0.1:4335/api/nodes   # vps deve aparecer reachable:true
 ## Segurança
 
 - Credenciais **não** ficam no código: env ou `auth.local.json` (gitignored).
-- Recomendado rodar atrás de rede confiável ou VPN (não há TLS próprio).
+- Recomendado rodar atrás de rede confiável ou VPN (Tailscale).
+
+### HTTPS (opcional)
+
+Por padrão o proxy roda em HTTP puro. Para habilitar TLS, aponte `HTTPS_CERT` e
+`HTTPS_KEY` para os arquivos do certificado:
+
+```bash
+# Tailscale (self-signed basta — o app confia na rede privada)
+openssl req -x509 -newkey rsa:2048 -nodes \
+  -keyout /etc/opencode/key.pem -out /etc/opencode/cert.pem \
+  -days 365 -subj "/CN=<ip-do-pc>"
+
+# VPS público: use Let's Encrypt (certbot) e aponte para os arquivos emitidos
+
+# systemd unit (drop-in) ou env:
+HTTPS_CERT=/etc/opencode/cert.pem HTTPS_KEY=/etc/opencode/key.pem node server.js
+# → PWA + proxy em https://0.0.0.0:4335
+```
+
+No app mobile, use `https://<host>:4335` no campo Endereço (ou
+`EXPO_PUBLIC_OPENCODE_HOST`). Com self-signed, o Android pode exigir aceitar o
+certificado na primeira conexão.
+
+### Rotação de credenciais
+
+1. **Via env (systemd)**: edite `OPENCODE_USERNAME`/`OPENCODE_PASSWORD` no unit
+   e rode `systemctl --user daemon-reload && systemctl --user restart opencode-proxy.service`.
+   A credencial antiga passa a retornar **401** imediatamente.
+2. **Via arquivo (a quente, sem restart)**: edite `auth.local.json` e envie
+   `kill -HUP <pid>` (ou `systemctl --user kill -s HUP opencode-proxy.service`).
+   O proxy recarrega o arquivo e troca a credencial em < 1s.
+
+Após rotacionar, atualize a senha no app (Ajustes → Senha) e salve.
 
 ## Licença
 
