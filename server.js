@@ -177,6 +177,70 @@ const PHONE_MODEL_BIG = process.env.PHONE_MODEL_BIG || '9router/combo-round-robi
 const PHONE_DEFAULT_MODEL = process.env.PHONE_DEFAULT_MODEL || 'opencode/big-pickle';
 const PHONE_BIG_SESSION_BYTES = parseInt(process.env.PHONE_BIG_SESSION_BYTES || '400000', 10);
 
+// ============================================================
+// VISÃO — descrição de imagens anexadas no chat.
+// O proxy intercepta mensagens com imagem, chama um modelo de
+// visão do 9router (OpenAI-compat) para descrever a imagem e
+// injeta a descrição no prompt do modelo principal da sessão.
+// Config via env: NINEROUTER_URL / NINEROUTER_KEY / VISION_MODELS
+// ============================================================
+const NINEROUTER_URL = (process.env.NINEROUTER_URL || 'http://localhost:20128').replace(/\/+$/, '');
+const NINEROUTER_KEY = process.env.NINEROUTER_KEY || 'sk-47cf0a5d2c5c4000-zjk3df-94c6d9ba';
+// cadeia de fallback: tenta cada modelo de visão em ordem até um responder
+const VISION_MODELS = (process.env.VISION_MODELS || 'nvidia/minimaxai/minimax-m3,rw/qwen/qwen2.5-vl-72b-instruct,rw/qwen/qwen3-vl-8b-instruct')
+  .split(',').map((s) => s.trim()).filter(Boolean);
+
+// Descreve uma imagem (base64) usando o primeiro modelo de visão que responder.
+// Retorna a descrição em texto, ou null se todos falharem.
+async function describeImage(dataUrl) {
+  if (!dataUrl || typeof dataUrl !== 'string') return null;
+  for (const model of VISION_MODELS) {
+    try {
+      const ctrl = new AbortController();
+      const timer = setTimeout(() => ctrl.abort(), 45000);
+      const res = await fetch(`${NINEROUTER_URL}/v1/chat/completions`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          ...(NINEROUTER_KEY ? { Authorization: `Bearer ${NINEROUTER_KEY}` } : {}),
+        },
+        body: JSON.stringify({
+          model,
+          messages: [{
+            role: 'user',
+            content: [
+              { type: 'text', text: 'Descreva esta imagem em detalhes, em português. Liste os elementos visuais principais, cores, texto legível, e qualquer informação relevante. Seja objetivo e completo.' },
+              { type: 'image_url', image_url: { url: dataUrl } },
+            ],
+          }],
+          max_tokens: 500,
+        }),
+        signal: ctrl.signal,
+      });
+      clearTimeout(timer);
+      if (!res.ok) {
+        const body = await res.text().catch(() => '');
+        logger.warn('vision.model_failed', { model, status: res.status, resp: body.slice(0, 200) });
+        continue;
+      }
+      const raw = await res.text();
+      // o 9router pode anexar "data: [DONE]" (SSE) após o JSON — remove antes de parsear
+      const jsonStr = raw.split('data: [DONE]')[0].trim();
+      const j = JSON.parse(jsonStr);
+      const desc = j?.choices?.[0]?.message?.content;
+      if (desc && typeof desc === 'string' && desc.trim()) {
+        logger.info('vision.described', { model, chars: desc.length });
+        return desc.trim();
+      }
+      logger.warn('vision.empty', { model });
+    } catch (e) {
+      logger.warn('vision.error', { model, error: e.message });
+    }
+  }
+  logger.error('vision.all_failed', { models: VISION_MODELS });
+  return null;
+}
+
 function parseModelRef(ref) {
   const [providerID, ...rest] = ref.split('/');
   return rest.length ? { providerID, modelID: rest.join('/') } : null;
@@ -1242,6 +1306,7 @@ const requestHandler = async (req, res) => {
       let promptText = '';
       let wantedModel = null;
       let wantedAgent = null;
+      let imageDataUrl = null;
       try {
         const j = JSON.parse(body);
         promptText = j.prompt?.text || j.text || '';
@@ -1254,10 +1319,26 @@ const requestHandler = async (req, res) => {
         if (typeof j.agent === 'string' && /^[A-Za-z0-9_-]{1,64}$/.test(j.agent)) {
           wantedAgent = j.agent;
         }
+        if (j.image && typeof j.image.data === 'string' && j.image.data) {
+          const mediaType = typeof j.image.mediaType === 'string' && j.image.mediaType ? j.image.mediaType : 'image/jpeg';
+          imageDataUrl = `data:${mediaType};base64,${j.image.data}`;
+        }
       } catch (_) {}
-      if (!promptText) {
+      if (!promptText && !imageDataUrl) {
         res.writeHead(400, { 'Content-Type': 'application/json' });
         return res.end(JSON.stringify({ error: 'prompt.text ausente' }));
+      }
+      // imagem anexada: descreve com o modelo de visão e injeta a descrição
+      // no prompt do modelo principal (arquitetura: modelo principal -> visão
+      // descreve -> output consolidado). Falha de visão não bloqueia o envio.
+      if (imageDataUrl) {
+        const desc = await describeImage(imageDataUrl);
+        if (desc) {
+          promptText = `[Imagem anexada — descrição gerada por modelo de visão]\n${desc}\n\n${promptText}`.trim();
+          logger.info('prompt.image_injected', { sessionIdFull: sessionId, descChars: desc.length });
+        } else {
+          promptText = `[Imagem anexada — não foi possível descrever]\n\n${promptText}`.trim();
+        }
       }
 
       const node = await findSessionNode(sessionId);
