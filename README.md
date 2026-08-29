@@ -53,6 +53,32 @@ Acesse `http://<ip-do-pc>:4335` no navegador do celular (mesma rede) e instale c
 - **Frontend**: botão **📋 Logs** no topo — anel dos últimos 300 eventos, com nível e timestamp.
 - `LOG_LEVEL` controla o filtro do servidor (debug|info|warn|error); `PROXY_DEBUG` espelha no console.
 
+## Adicionar um node (ex: VPS)
+
+O proxy agrega vários nodes `opencode serve`. O node `main` é o upstream local
+(`API_HOST`/`API_PORT`); nodes extras entram via env `NODES_<ID>_HOST/PORT/NAME/COLOR/SSH`
+no unit systemd. Use o script `scripts/add-node.sh` — ele valida a conectividade
+com health check real **antes** de aplicar, escreve um drop-in systemd, reinicia
+o serviço e confere em `/api/nodes` (com rollback em falha):
+
+```bash
+# 1. No node (VPS): gere um token e suba o serve
+opencode serve --hostname 0.0.0.0 --port 4096
+
+# 2. No PC do proxy: adicione o node
+./scripts/add-node.sh --id vps --host <ip-do-vps> --port 4096 \
+  --name VPS --color '#58a6ff' --ssh user@<ip-do-vps>
+
+# 3. Confira
+curl http://127.0.0.1:4335/api/nodes   # vps deve aparecer reachable:true
+```
+
+- `--id` (obrigatório): `[a-z0-9]+` (ex: `vps`, `lubuntu`).
+- `--host` (obrigatório): IP/hostname do node.
+- `--port` (default `4333`), `--name` (default = id), `--color` (hex `#rrggbb`), `--ssh` (opcional, p/ telemetria remota).
+- Se o node não responder ao health check, o script **aborta sem alterar nada**.
+- Para remover: apague o drop-in `~/.config/systemd/user/opencode-proxy.service.d/nodes.conf` e rode `systemctl --user daemon-reload && systemctl --user restart opencode-proxy.service`.
+
 ## Segurança
 
 - Credenciais **não** ficam no código: env ou `auth.local.json` (gitignored).

@@ -1,3 +1,6 @@
+// O server injeta o valor real de APP_AUTH ao servir este arquivo.
+const APP_AUTH = '__APP_AUTH__';
+
 function app() {
   return {
     // --- views: 'home' (dashboard atividade), 'sessions', 'session' ---
@@ -57,8 +60,13 @@ function app() {
     },
 
     async api(path, method, body) {
-      const opts = { method: method || 'GET' };
-      if (body) { opts.headers = { 'Content-Type': 'application/json' }; opts.body = JSON.stringify(body); }
+      // O proxy exige auth Basic (mesma do auth.local.json); o server injeta o
+      // valor real no lugar de APP_AUTH ao servir este arquivo.
+      const opts = {
+        method: method || 'GET',
+        headers: { 'Authorization': APP_AUTH },
+      };
+      if (body) { opts.headers['Content-Type'] = 'application/json'; opts.body = JSON.stringify(body); }
       const t0 = Date.now();
       try {
         const res = await fetch(path, opts);

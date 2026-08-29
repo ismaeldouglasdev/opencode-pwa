@@ -26,7 +26,13 @@ function loadNodes() {
   const raw = process.env.NODES_JSON;
   let nodes = [];
   if (raw) {
-    try { nodes = JSON.parse(raw); } catch (e) { console.error('[FATAL] NODES_JSON inválido:', e.message); process.exit(1); }
+    try {
+      nodes = JSON.parse(raw).map((n) => {
+        // NODES_JSON pode omitir 'base'; deriva de host:port quando ausente.
+        if (!n.base && n.host && n.port) return { ...n, base: `http://${n.host}:${n.port}` };
+        return n;
+      });
+    } catch (e) { console.error('[FATAL] NODES_JSON inválido:', e.message); process.exit(1); }
   } else {
     const defaultNode = {
       id: 'main',
@@ -65,8 +71,65 @@ NODE_BY_ID.get('main').host = API_HOST;
 NODE_BY_ID.get('main').port = API_PORT;
 const DEFAULT_NODE = NODES[0];
 
+// ---------------------------------------------------------------------------
+// Node metadata persistente (nomes/cores customizados pelo app).
+// Salvo em node-names.json junto ao proxy; carregado na inicialização e
+// aplicado sobre os defaults do loadNodes(). Assim renomear no app vale
+// para TODOS os clientes (server-side), e sobrevive a restarts do proxy.
+// ---------------------------------------------------------------------------
+const NODE_NAMES_FILE = path.join(__dirname, 'node-names.json');
+function loadNodeNames() {
+  try { return JSON.parse(fs.readFileSync(NODE_NAMES_FILE, 'utf8')); }
+  catch (_) { return {}; } // arquivo ausente/inválido -> sem overrides
+}
+const nodeNames = loadNodeNames();
+for (const [id, n] of NODE_BY_ID) {
+  const saved = nodeNames[id];
+  if (saved) {
+    if (saved.name) n.name = saved.name;
+    if (saved.color) n.color = saved.color;
+  }
+}
+function saveNodeNames() {
+  try { fs.writeFileSync(NODE_NAMES_FILE, JSON.stringify(nodeNames, null, 2)); return true; }
+  catch (e) { logger.error('node_names.save_failed', { error: e.message }); return false; }
+}
+
 function nodeById(id) {
   return NODE_BY_ID.get(id) || null;
+}
+
+// ---------------------------------------------------------------------------
+// Fail-fast + negative cache de nodes offline.
+// Evita que o timeout do fetch (6s) trave o proxy em cada poll do app.
+// ---------------------------------------------------------------------------
+const nodeDownCache = new Map(); // nodeId -> timestampDown
+const NODE_DOWN_TTL_MS = parseInt(process.env.NODE_DOWN_TTL_MS || '15000', 10);
+
+function isNodeDown(id) {
+  const ts = nodeDownCache.get(id);
+  if (!ts) return false;
+  if ((Date.now() - ts) > NODE_DOWN_TTL_MS) {
+    nodeDownCache.delete(id);
+    return false;
+  }
+  return true;
+}
+
+function markNodeDown(id, reason) {
+  if (!nodeDownCache.has(id)) {
+    const n = nodeById(id);
+    logger.warn('node.down', { node: id, name: n?.name, reason });
+  }
+  nodeDownCache.set(id, Date.now());
+}
+
+function markNodeUp(id) {
+  if (nodeDownCache.has(id)) {
+    const n = nodeById(id);
+    logger.info('node.up', { node: id, name: n?.name });
+    nodeDownCache.delete(id);
+  }
 }
 
 // Encontra em qual node a sessão vive (checa a lista agregada em cache,
@@ -81,12 +144,15 @@ async function findSessionNode(sessionId) {
     return nodeById(cachedId) || null;
   }
   const jobs = NODES.map(async (n) => {
+    if (isNodeDown(n.id)) return null; // fail-fast: node sabidamente offline
     try {
       const res = await fetch(`${n.base}/session/${encodeURIComponent(sessionId)}`, {
         headers: { Authorization: AUTH },
-        signal: AbortSignal.timeout(3000),
+        signal: AbortSignal.timeout(1500),
       });
-      return res.ok ? n : null;
+      if (!res.ok) return null;
+      markNodeUp(n.id); // resposta saudável: cancela marcação de down
+      return n;
     } catch (_) { return null; }
   });
   const found = (await Promise.all(jobs)).find(Boolean) || null;
@@ -284,6 +350,18 @@ function buildBridgeMessage(mrow) {
   let hasStepFinish = false;
   let lastUpdated = mrow.time_updated || mrow.time_created;
 
+  // erro do modelo (ex.: rate limit 429) gravado pelo serve em message.error —
+  // sem isto o app vê spinner eterno e depois "(sem resposta)" sem explicação
+  let error = null;
+  if (mdata.error) {
+    const ed = mdata.error.data || {};
+    error = {
+      name: mdata.error.name || 'Error',
+      message: ed.message || 'erro desconhecido',
+      statusCode: ed.statusCode || null
+    };
+  }
+
   for (const p of parts) {
     const d = p.data;
     if (d.type === 'reasoning' || d.type === 'text') {
@@ -321,13 +399,14 @@ function buildBridgeMessage(mrow) {
     ...base,
     time: { ...base.time, completed: lastUpdated },
     type: 'assistant',
-    inProgress: !hasStepFinish,
+    inProgress: !hasStepFinish && !error,
     agent: mdata.agent || null,
     model,
     finish: finish || mdata.finish || 'stop',
     cost: mdata.cost !== undefined ? mdata.cost : cost,
     tokens: mdata.tokens || tokens,
-    content
+    content,
+    error
   };
 }
 
@@ -434,6 +513,7 @@ const nodeHealthCache = new Map(); // nodeId -> { ts, data }
 const NODE_HEALTH_TTL_MS = parseInt(process.env.NODE_HEALTH_TTL_MS || '2000', 10);
 
 async function nodeHealth(node, force) {
+  if (isNodeDown(node.id)) throw new Error('health indisponível'); // fail-fast
   const cached = nodeHealthCache.get(node.id);
   if (!force && cached && (Date.now() - cached.ts) < NODE_HEALTH_TTL_MS) {
     return cached.data;
@@ -454,13 +534,17 @@ async function nodeHealth(node, force) {
         const ident = process.env.SSH_IDENTITY || `${os.homedir()}/.ssh/id_ed25519_ospos`;
         const out = await pexec('/bin/sh', ['-c', `${process.env.SSH_BIN} -i ${ident} -o BatchMode=yes -o ConnectTimeout=4 ${node.ssh} 'cat /proc/uptime; echo; free -m | sed -n 2p; cat /proc/stat | sed -n 1p; cat /sys/class/thermal/thermal_zone2/type 2>/dev/null; cat /sys/class/thermal/thermal_zone2/temp 2>/dev/null'`], { timeout: 6000 });
         data = parseSshHealth(out.stdout, node.id);
-        logger.info('node.health_ssh', { node: node.id });
+        logger.debug('node.health_ssh', { node: node.id });
       } catch (e) {
-        logger.warn('node.health_ssh_failed', { node: node.id, error: e.message });
+        logger.debug('node.health_ssh_failed', { node: node.id, error: e.message });
       }
     }
   }
-  if (!data) throw new Error('health indisponível');
+  if (!data) {
+    markNodeDown(node.id, 'health indisponível');
+    throw new Error('health indisponível');
+  }
+  markNodeUp(node.id);
   nodeHealthCache.set(node.id, { ts: Date.now(), data });
   logger.debug('node.health_cached', { node: node.id });
   return data;
@@ -522,17 +606,22 @@ function proxySessionsSorted(req, res) {
   // agrega sessões de TODOS os nodes em paralelo, taggeando cada uma com
   // {node: {id, name, color}} pra o app colorir o chat por PC.
   const jobs = NODES.map(async (n) => {
+    if (isNodeDown(n.id)) return null; // fail-fast: pula node sabidamente offline
     try {
       const res = await fetch(`${n.base}/api/session?limit=${upstreamLimit}`, {
         headers: { Authorization: AUTH, Accept: 'application/json' },
-        signal: AbortSignal.timeout(6000),
+        signal: AbortSignal.timeout(2500),
       });
-      if (!res.ok) return null;
+      if (!res.ok) {
+        markNodeDown(n.id, `http ${res.status}`);
+        return null;
+      }
+      markNodeUp(n.id);
       const body = await res.json();
       const list = Array.isArray(body) ? body : (body.data || []);
       return list.map((s) => ({ ...s, node: { id: n.id, name: n.name, color: n.color } }));
     } catch (e) {
-      logger.warn('bridge.sessions_node_error', { node: n.id, error: e.message });
+      markNodeDown(n.id, e.message);
       return null;
     }
   });
@@ -909,6 +998,14 @@ function proxyApi(req, res, node) {
   });
 
   if (method === 'POST' || method === 'PUT') {
+    // Se a rota já leu o body (ex: POST /session p/ parsear nodeId), reutiliza
+    // o buffer em vez de re-ouvir o stream já consumido (senão envia body vazio).
+    if (req._bufferedBody !== undefined) {
+      const b = req._bufferedBody;
+      logger.debug('proxy.request_body', { method, path: url, body: b.slice(0, 500) });
+      preq.end(b);
+      return;
+    }
     const chunks = [];
     req.on('data', (c) => chunks.push(c));
     req.on('end', () => {
@@ -920,6 +1017,14 @@ function proxyApi(req, res, node) {
   } else {
     preq.end();
   }
+}
+
+// Guard anti-misroute de rotas per-session: sem node dono e sem bridge,
+// o proxy NÃO pode cair silenciosamente no main (sessão de node offline
+// apareceria vazia/errada no celular). Responde direto o erro operacional.
+function replySessionMiss(res, code, msg) {
+  res.writeHead(code, { 'Content-Type': 'application/json; charset=utf-8' });
+  return res.end(JSON.stringify({ error: msg }));
 }
 
 // ============================================================
@@ -970,14 +1075,40 @@ const server = http.createServer(async (req, res) => {
     const out = await Promise.all(NODES.map(async (n) => {
       try {
         const h = await nodeHealth(n, true);
-        return { id: n.id, name: n.name, color: n.color, host: n.host, port: n.port, health: h };
+        return { id: n.id, name: n.name, color: n.color, host: n.host, port: n.port, health: h, reachable: true };
       } catch (e) {
-        logger.warn('nodes.health_error', { node: n.id, error: e.message });
-        return { id: n.id, name: n.name, color: n.color, host: n.host, port: n.port, health: null };
+        // transição down já é logada por markNodeDown; aqui só debug por-request
+        logger.debug('nodes.health_error', { node: n.id, error: e.message });
+        return { id: n.id, name: n.name, color: n.color, host: n.host, port: n.port, health: null, reachable: false };
       }
     }));
     logger.info('nodes.list', { count: NODES.length, ids: NODES.map((n) => n.id).join(',') });
     return serve(200, { nodes: out });
+  }
+
+  // POST /api/nodes/:id — renomeia/recolore um nó. Persistido em
+  // node-names.json (server-side), valendo para todos os clientes.
+  if (method === 'POST' && urlPath.startsWith('/api/nodes/')) {
+    const nid = decodeURIComponent(urlPath.slice('/api/nodes/'.length).split('/')[0]);
+    const node = nodeById(nid);
+    if (!node) {
+      res.writeHead(404, { 'Content-Type': 'application/json' });
+      return res.end(JSON.stringify({ error: `node desconhecido: ${nid}` }));
+    }
+    let body = '';
+    req.on('data', (c) => body += c);
+    req.on('end', () => {
+      let name, color;
+      try { ({ name, color } = JSON.parse(body || '{}')); } catch (_) { name = undefined; color = undefined; }
+      if (name !== undefined) node.name = String(name).slice(0, 40);
+      if (color !== undefined) node.color = String(color).slice(0, 20);
+      nodeNames[nid] = { name: node.name, color: node.color };
+      saveNodeNames();
+      logger.info('node.renamed', { node: nid, name: node.name, color: node.color });
+      res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+      res.end(JSON.stringify({ id: nid, name: node.name, color: node.color }));
+    });
+    return;
   }
 
   // GET /api/node/:id/pc-health — telemetria de UM node (PC) p/ o app.
@@ -999,7 +1130,7 @@ const server = http.createServer(async (req, res) => {
       const d = await nodeHealth(node);
       return serve(200, d);
     } catch (e) {
-      logger.error('pc-health.error', { node: nid, error: e.message });
+      logger.debug('pc-health.error', { node: nid, error: e.message });
       return serve(502, { error: e.message });
     }
   }
@@ -1046,6 +1177,7 @@ const server = http.createServer(async (req, res) => {
         return res.end(JSON.stringify(synth));
       }
     }
+    if (!node) return replySessionMiss(res, 404, 'sessão não encontrada em nenhum node');
     return proxyApi(req, res, node);
   }
 
@@ -1057,6 +1189,7 @@ const server = http.createServer(async (req, res) => {
       logger.info('bridge.sse_synthesized', { sessionId: sessionId.slice(0, 12), node: node ? node.id : 'main' });
       return bridgeSSE(req, res, sessionId);
     }
+    if (!node) return replySessionMiss(res, 404, 'sessão não encontrada em nenhum node');
     return proxyApi(req, res, node);
   }
 
@@ -1103,6 +1236,7 @@ const server = http.createServer(async (req, res) => {
       }
 
       const node = await findSessionNode(sessionId);
+      if (!node) return replySessionMiss(res, 502, 'node da sessão offline ou sessão não encontrada');
       const base = node ? node.base : `http://${API_HOST}:${API_PORT}`;
       if (node && node.id !== 'main') logger.info('prompt.routed_to_node', { sessionIdFull: sessionId, node: node.id, base });
       const authHeaders = { Authorization: AUTH, 'Content-Type': 'application/json' };
@@ -1230,6 +1364,33 @@ const server = http.createServer(async (req, res) => {
   // serve é /session/:id/abort — sem isto o botão parar não aborta (200 falso).
   // Em ambos os caminhos, limpa liveParts da sessão pra /live não realimentar
   // a UI com a mensagem já morta (spinner eterno após parar)
+
+  // POST /session — cria uma sessão NO NÓ ESCOLHIDO. O app envia { nodeId } no
+  // body; sem nodeId cria no default (main). Roteia o forward pro nó dono.
+  if (method === 'POST' && urlPath === '/session') {
+    let body = '';
+    req.on('data', (c) => body += c);
+    req.on('end', () => {
+      let nodeId, payload;
+      try {
+        const j = JSON.parse(body || '{}');
+        nodeId = j.nodeId;
+        payload = { ...j };
+        delete payload.nodeId;
+      } catch (_) { nodeId = undefined; payload = undefined; }
+      const node = nodeId ? nodeById(nodeId) : null;
+      if (nodeId && !node) {
+        res.writeHead(404, { 'Content-Type': 'application/json' });
+        return res.end(JSON.stringify({ error: `node desconhecido: ${nodeId}` }));
+      }
+      logger.info('session.create', { node: node ? node.id : 'main', payload: payload ? Object.keys(payload) : [] });
+      req.url = '/session';
+      req._bufferedBody = body; // proxyApi reutiliza (evita re-ouvir stream consumido)
+      return proxyApi(req, res, node);
+    });
+    return;
+  }
+
   if (method === 'POST') {
     const am = urlPath.match(/^\/api\/session\/([^/]+)\/abort$/) || urlPath.match(/^\/session\/([^/]+)\/abort$/);
     if (am) {
@@ -1237,6 +1398,7 @@ const server = http.createServer(async (req, res) => {
       req.url = `/session/${encodeURIComponent(sid)}/abort`;
       for (const [k, v] of liveParts) if (v.sessionId === sid) liveParts.delete(k);
       const node = await findSessionNode(sid);
+      if (!node) return replySessionMiss(res, 502, 'node da sessão offline ou sessão não encontrada');
       if (node && node.id !== 'main') logger.info('abort.routed_to_node', { sessionId: sid.slice(0, 14), node: node.id });
       logger.info('abort.forward', { sessionId: sid.slice(0, 14), node: node ? node.id : 'main' });
       return proxyApi(req, res, node);
@@ -1275,6 +1437,11 @@ const server = http.createServer(async (req, res) => {
       }
     } else {
       logger.debug('static.served', { method, path: urlPath, bytes: content.length });
+      // Injeta a auth Basic no app.js (placeholder __APP_AUTH__) para que o
+      // frontend autentique no proxy sem expor credenciais hardcoded no fonte.
+      if (rel === '/app.js') {
+        content = Buffer.from(content.toString('utf8').split('__APP_AUTH__').join(AUTH));
+      }
       res.writeHead(200, { 'Content-Type': MIME[extname] || 'application/octet-stream' });
       res.end(content);
     }
