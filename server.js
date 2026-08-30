@@ -187,12 +187,48 @@ const PHONE_BIG_SESSION_BYTES = parseInt(process.env.PHONE_BIG_SESSION_BYTES || 
 const NINEROUTER_URL = (process.env.NINEROUTER_URL || 'http://localhost:20128').replace(/\/+$/, '');
 const NINEROUTER_KEY = process.env.NINEROUTER_KEY || 'sk-47cf0a5d2c5c4000-zjk3df-94c6d9ba';
 // cadeia de fallback: tenta cada modelo de visão em ordem até um responder
-const VISION_MODELS = (process.env.VISION_MODELS || 'nvidia/minimaxai/minimax-m3,rw/qwen/qwen2.5-vl-72b-instruct,rw/qwen/qwen3-vl-8b-instruct')
+const VISION_MODELS = (process.env.VISION_MODELS || 'nvidia/minimaxai/minimax-m3,seek/gemini-3-6-flash,rw/qwen/qwen2.5-vl-72b-instruct,rw/qwen/qwen3-vl-8b-instruct')
   .split(',').map((s) => s.trim()).filter(Boolean);
 // visão é best-effort: o client mobile aborta em ~15s, então a descrição NUNCA
 // pode travar o envio do prompt. Deadline duro total + timeout curto por modelo.
-const VISION_DEADLINE_MS = Number(process.env.VISION_DEADLINE_MS || 10000);
-const VISION_TIMEOUT_MS = Number(process.env.VISION_TIMEOUT_MS || 8000);
+// Providers de visão do 9router estão majoritariamente esgotados (429/402/500),
+// então o deadline é curto para o fallback entrar rápido e o prompt não atrasar.
+const VISION_DEADLINE_MS = Number(process.env.VISION_DEADLINE_MS || 4000);
+const VISION_TIMEOUT_MS = Number(process.env.VISION_TIMEOUT_MS || 3000);
+
+// ── GUARD de repetição degenerada ──────────────────────────────────────────
+// Causa raiz dos loops de 2026-08-29: o modelo (opencode/big-pickle) degenerou
+// e produziu UMA resposta com 2346 repetições de uma mesma frase (84KB). Este
+// guard detecta esse padrão no stream de texto que passa pelo proxy e:
+//   (1) trunca a live part para o app não receber o lixo infinito,
+//   (2) dispara abort do run no serve (fire-and-forget).
+// Heurística: dividir o texto em "sentenças" (fragmentos >= DEGENERATION_MIN_SENTENCE_LEN)
+// e, se UMA sentença se repetir >= DEGENERATION_REPEAT_THRESHOLD vezes, é degeneração.
+const DEGENERATION_REPEAT_THRESHOLD = Number(process.env.DEGENERATION_REPEAT_THRESHOLD || 20);
+const DEGENERATION_MIN_SENTENCE_LEN = Number(process.env.DEGENERATION_MIN_SENTENCE_LEN || 15);
+const DEGENERATION_CHECK_INTERVAL = Number(process.env.DEGENERATION_CHECK_INTERVAL || 2000); // chars crescidos entre checks
+const DEGENERATION_MAX_CHECK_TEXT = Number(process.env.DEGENERATION_MAX_CHECK_TEXT || 40000); // janela max analisada/check
+const DEGENERATION_KEEP = Number(process.env.DEGENERATION_KEEP || 2000); // chars mantidos na part truncada
+const DEGENERATION_NOTICE = '\n\n[⚠️ resposta interrompida pelo proxy — repetição degenerada detectada]';
+
+// Detecta degeneração por repetição de sentença num texto acumulado.
+// Segura para streaming: só roda a cada DEGENERATION_CHECK_INTERVAL chars e numa
+// janela limitada (DEGENERATION_MAX_CHECK_TEXT), então custo é O(1) amortizado.
+function detectDegeneration(text) {
+  if (!text || text.length < DEGENERATION_MIN_SENTENCE_LEN) return null;
+  const window = text.slice(-DEGENERATION_MAX_CHECK_TEXT);
+  const counts = new Map();
+  // quebra em sentenças por pontuação forte / quebra de linha / ponto-e-vírgula
+  const sentences = window.split(/[.!?\n;]+/);
+  for (let raw of sentences) {
+    const s = raw.trim();
+    if (s.length < DEGENERATION_MIN_SENTENCE_LEN) continue;
+    const n = (counts.get(s) || 0) + 1;
+    counts.set(s, n);
+    if (n >= DEGENERATION_REPEAT_THRESHOLD) return { sentence: s.slice(0, 80), count: n };
+  }
+  return null;
+}
 
 // Descreve uma imagem (base64) usando o primeiro modelo de visão que responder.
 // Retorna a descrição em texto, ou null se todos falharem ou estourar o deadline.
@@ -969,6 +1005,28 @@ const sessionGoodModel = new Map();
 // INVARIANTE: só UMA conexão /event acumula deltas; reconexões extras são
 // espectadoras — senão o mesmo delta soma N vezes (bug do texto 4x duplicado)
 let primaryTap = null;
+// sessões cujo run já foi abortado por degeneração (evita spammar o abort)
+const degenerateAborted = new Map(); // sessionId -> ts
+
+// Aborta (fire-and-forget) o run de uma sessão degenerada no serve dono.
+// Usa POST {base}/session/{id}/abort (único endpoint real do serve; o caminho
+// /api/.../abort é HTML catch-all). Falha não derruba o proxy.
+function abortDegenerateSession(sessionId, node) {
+  const nid = node ? node.id : 'main';
+  const last = degenerateAborted.get(sessionId);
+  if (last && Date.now() - last < 30000) return; // no máx 1 abort/30s por sessão
+  degenerateAborted.set(sessionId, Date.now());
+  const base = node && node.base ? node.base : `http://${API_HOST}:${API_PORT}`;
+  fetch(`${base}/session/${encodeURIComponent(sessionId)}/abort`, {
+    method: 'POST',
+    headers: { Authorization: AUTH, 'Content-Type': 'application/json' },
+    signal: AbortSignal.timeout(5000),
+  }).then((r) => {
+    logger.warn('degeneration.aborted', { node: nid, sessionIdFull: sessionId, status: r.status, ok: r.ok });
+  }).catch((e) => {
+    logger.warn('degeneration.abort_failed', { node: nid, sessionIdFull: sessionId, error: e.message });
+  });
+}
 
 function tapSseChunk(chunk, state) {
   if (!primaryTap || primaryTap.dead) primaryTap = state;
@@ -988,15 +1046,36 @@ function tapSseChunk(chunk, state) {
     }
     if (!authoritative) continue;
     if (evt.type === 'message.part.delta' && p.messageID && (p.field === 'text' || p.field === 'reasoning')) {
-      const cur = liveParts.get(p.messageID) || { sessionId: p.sessionID, text: '', reasoning: '', ts: 0 };
-      if (p.field === 'text') cur.text += p.delta || '';
-      else cur.reasoning += p.delta || '';
+      const cur = liveParts.get(p.messageID) || { sessionId: p.sessionID, text: '', reasoning: '', ts: 0, checkAt: 0, aborted: false };
+      if (p.field === 'text') {
+        cur.text += p.delta || '';
+        // GUARD degradação: a cada DEGENERATION_CHECK_INTERVAL chars crescidos,
+        // varre a janela por repetição de sentença; se degenerar, trunca a part
+        // (app não recebe o lixo) e aborta o run no serve.
+        if (!cur.aborted && cur.text.length - (cur.checkAt || 0) >= DEGENERATION_CHECK_INTERVAL) {
+          cur.checkAt = cur.text.length;
+          const hit = detectDegeneration(cur.text);
+          if (hit) {
+            cur.aborted = true;
+            cur.text = cur.text.slice(0, DEGENERATION_KEEP) + DEGENERATION_NOTICE;
+            logger.error('degeneration.detected', {
+              sessionId: (p.sessionID || '').slice(0, 14),
+              messageID: p.messageID.slice(0, 14),
+              sentence: hit.sentence,
+              count: hit.count,
+              textChars: cur.text.length,
+            });
+            const node = state.node || null;
+            if (p.sessionID) abortDegenerateSession(p.sessionID, node);
+          }
+        }
+      } else cur.reasoning += p.delta || '';
       cur.ts = Date.now();
       if (cur.text.length > 200000) cur.text = cur.text.slice(-150000);
       liveParts.set(p.messageID, cur);
     } else if (evt.type === 'message.part.updated' && p.messageID && p.part && typeof p.part.text === 'string') {
       const cur = liveParts.get(p.messageID);
-      if (cur && p.part.text.length >= cur.text.length) {
+      if (cur && !cur.aborted && p.part.text.length >= cur.text.length) {
         cur.text = p.part.text;
         cur.ts = Date.now();
       }
@@ -1062,7 +1141,7 @@ function proxyApi(req, res, node) {
 
   const preq = http.request(options, (pres) => {
     const isSSE = (pres.headers['content-type'] || '').includes('text/event-stream');
-    const tapState = isSSE && url === '/event' ? { rem: '', dead: false } : null;
+    const tapState = isSSE && url === '/event' ? { rem: '', dead: false, node } : null;
     if (tapState) res.on('close', () => { tapState.dead = true; });
     res.writeHead(pres.statusCode || 502, {
       'Content-Type': pres.headers['content-type'] || 'application/json',
