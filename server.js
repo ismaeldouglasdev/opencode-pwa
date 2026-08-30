@@ -189,15 +189,22 @@ const NINEROUTER_KEY = process.env.NINEROUTER_KEY || 'sk-47cf0a5d2c5c4000-zjk3df
 // cadeia de fallback: tenta cada modelo de visão em ordem até um responder
 const VISION_MODELS = (process.env.VISION_MODELS || 'nvidia/minimaxai/minimax-m3,rw/qwen/qwen2.5-vl-72b-instruct,rw/qwen/qwen3-vl-8b-instruct')
   .split(',').map((s) => s.trim()).filter(Boolean);
+// visão é best-effort: o client mobile aborta em ~15s, então a descrição NUNCA
+// pode travar o envio do prompt. Deadline duro total + timeout curto por modelo.
+const VISION_DEADLINE_MS = Number(process.env.VISION_DEADLINE_MS || 10000);
+const VISION_TIMEOUT_MS = Number(process.env.VISION_TIMEOUT_MS || 8000);
 
 // Descreve uma imagem (base64) usando o primeiro modelo de visão que responder.
-// Retorna a descrição em texto, ou null se todos falharem.
+// Retorna a descrição em texto, ou null se todos falharem ou estourar o deadline.
 async function describeImage(dataUrl) {
   if (!dataUrl || typeof dataUrl !== 'string') return null;
+  const deadline = Date.now() + VISION_DEADLINE_MS;
   for (const model of VISION_MODELS) {
+    if (Date.now() > deadline) break;
     try {
       const ctrl = new AbortController();
-      const timer = setTimeout(() => ctrl.abort(), 45000);
+      const remaining = Math.max(1000, deadline - Date.now());
+      const timer = setTimeout(() => ctrl.abort(), Math.min(VISION_TIMEOUT_MS, remaining));
       const res = await fetch(`${NINEROUTER_URL}/v1/chat/completions`, {
         method: 'POST',
         headers: {
