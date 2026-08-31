@@ -1651,9 +1651,13 @@ const requestHandler = async (req, res) => {
           // agent builtin ('build'/'plan') → chain do plugin resolve ids mortos
           // do catálogo zen (ProviderModelNotFoundError, ver 24/08). Só
           // Sisyphus-Junior roda OK — força PHONE_AGENT pro forward.
-          const useAgent = (wantedAgent && wantedAgent !== 'build' && wantedAgent !== 'plan') ? wantedAgent : PHONE_AGENT;
+          // Nodes REMOTOS (ex.: lubuntu) não têm os agents custom do main —
+          // forçar Sisyphus-Junior lá dá 500 (UnknownError em createUserMessage).
+          const useAgent = (wantedAgent && wantedAgent !== 'build' && wantedAgent !== 'plan')
+            ? wantedAgent
+            : (node && node.id !== 'main' ? 'build' : PHONE_AGENT);
           if (wantedAgent && wantedAgent !== useAgent) {
-            logger.warn('prompt.agent_forced', { sessionIdFull: sessionId, wantedAgent, forced: useAgent });
+            logger.warn('prompt.agent_forced', { sessionIdFull: sessionId, wantedAgent, forced: useAgent, node: node ? node.id : 'main' });
           }
           res.end(JSON.stringify({
             data: { id: 'msg_fwd_' + Date.now().toString(36), sessionID: sessionId, accepted: true },
