@@ -1194,6 +1194,114 @@ function proxyApi(req, res, node) {
   }
 }
 
+// Fan-in do /event global: antes só encaminhava o node `main`; agora abre
+// uma conexão /event por node alcançável e mescla num único stream, taggeando
+// cada evento com {node:{id,name,color}}. Reconexão por node com backoff.
+const EVENT_RECONNECT_MIN_MS = parseInt(process.env.EVENT_RECONNECT_MIN_MS || '2000', 10);
+
+function proxyEventFanIn(req, res) {
+  res.writeHead(200, {
+    'Content-Type': 'text/event-stream',
+    'Cache-Control': 'no-cache',
+    'Connection': 'keep-alive',
+    'X-Accel-Buffering': 'no'
+  });
+
+  const clients = []; // { node, preq, pres, rem, dead, timer }
+  let closed = false;
+
+  const cleanup = () => {
+    if (closed) return;
+    closed = true;
+    for (const c of clients) {
+      if (c.timer) clearTimeout(c.timer);
+      try { c.preq.destroy(); } catch (_) {}
+      try { c.pres.destroy(); } catch (_) {}
+    }
+    clients.length = 0;
+    try { res.end(); } catch (_) {}
+  };
+  res.on('close', cleanup);
+  res.on('error', cleanup);
+
+  const connectNode = (node) => {
+    if (closed) return;
+    if (isNodeDown(node.id)) {
+      // node offline: agenda reconexão sem spammar
+      const c = { node, preq: null, pres: null, rem: '', dead: false, timer: null };
+      clients.push(c);
+      c.timer = setTimeout(() => {
+        const i = clients.indexOf(c);
+        if (i >= 0) clients.splice(i, 1);
+        connectNode(node);
+      }, EVENT_RECONNECT_MIN_MS);
+      return;
+    }
+    const base = node.base || `http://${node.host}:${node.port}`;
+    const u = new URL(base);
+    const options = {
+      hostname: u.hostname,
+      port: u.port || (u.protocol === 'https:' ? 443 : 80),
+      path: '/event',
+      method: 'GET',
+      headers: { 'Authorization': AUTH, 'Accept': 'text/event-stream' }
+    };
+    const transport = u.protocol === 'https:' ? https : http;
+    const preq = transport.request(options, (pres) => {
+      const c = { node, preq, pres, rem: '', dead: false, timer: null };
+      clients.push(c);
+      pres.on('data', (chunk) => {
+        if (closed) return;
+        c.rem += chunk.toString('utf8');
+        const lines = c.rem.split('\n');
+        c.rem = lines.pop();
+        for (const line of lines) {
+          if (!line.startsWith('data: ')) continue;
+          let evt;
+          try { evt = JSON.parse(line.slice(6)); } catch { continue; }
+          // taggeia a origem do node (não sobrescreve properties existentes)
+          const props = evt.properties || {};
+          if (!props.node) {
+            props.node = { id: node.id, name: node.name, color: node.color };
+          }
+          const out = { ...evt, properties: props };
+          try { res.write(`data: ${JSON.stringify(out)}\n\n`); } catch (_) { cleanup(); return; }
+        }
+      });
+      pres.on('end', () => {
+        const i = clients.indexOf(c);
+        if (i >= 0) clients.splice(i, 1);
+        if (!closed) {
+          c.timer = setTimeout(() => connectNode(node), EVENT_RECONNECT_MIN_MS);
+        }
+      });
+      pres.on('error', () => {
+        const i = clients.indexOf(c);
+        if (i >= 0) clients.splice(i, 1);
+        if (!closed) {
+          c.timer = setTimeout(() => connectNode(node), EVENT_RECONNECT_MIN_MS);
+        }
+      });
+    });
+    preq.on('error', () => {
+      if (!closed) {
+        const c = { node, preq, pres: null, rem: '', dead: false, timer: null };
+        clients.push(c);
+        c.timer = setTimeout(() => {
+          const i = clients.indexOf(c);
+          if (i >= 0) clients.splice(i, 1);
+          connectNode(node);
+        }, EVENT_RECONNECT_MIN_MS);
+      }
+    });
+    preq.end();
+  };
+
+  // conecta em todos os nodes alcançáveis (main + lubuntu + futuros)
+  for (const n of NODES) connectNode(n);
+  logger.info('event.fan_in_started', { nodes: NODES.map((n) => n.id) });
+}
+
 // Guard anti-misroute de rotas per-session: sem node dono e sem bridge,
 // o proxy NÃO pode cair silenciosamente no main (sessão de node offline
 // apareceria vazia/errada no celular). Responde direto o erro operacional.
@@ -1599,12 +1707,18 @@ const requestHandler = async (req, res) => {
 
   // API paths -> forward para a API real (com streaming para SSE)
   if (urlPath === '/project' || urlPath === '/session' || urlPath.startsWith('/session/') ||
-      urlPath === '/event' ||
       urlPath === '/permission' || urlPath.startsWith('/permission/') ||
       urlPath === '/question' || urlPath.startsWith('/question/') ||
       urlPath.startsWith('/api/') || urlPath.startsWith('/config')) {
     logger.debug('proxy.request', { method, path: urlPath });
     return proxyApi(req, res);
+  }
+
+  // /event global: fan-in multi-nó (main + lubuntu + futuros) — o celular
+  // vê a atividade ao vivo de TODOS os PCs, não só do main.
+  if (urlPath === '/event') {
+    logger.debug('proxy.event_fan_in', { method, path: urlPath });
+    return proxyEventFanIn(req, res);
   }
 
   // Static files (contenção de path — bloqueia traversal tipo /../)
