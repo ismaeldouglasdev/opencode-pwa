@@ -427,8 +427,34 @@ function openDb() {
   return db;
 }
 
-// Quantas mensagens a sessão tem no SQLite (para decidir se sintetizamos)
-function bridgeHasMessages(sessionId) {  const d = openDb();
+// Bridge remoto: sessões TUI de nodes remotos (ex.: lubuntu) têm mensagens no
+// SQLite local daquele PC. Roda um script Python embutido (base64) via SSH.
+const REMOTE_BRIDGE_SCRIPT_B64 = 'IyEvdXNyL2Jpbi9lbnYgcHl0aG9uMwojIFJlbW90ZSBicmlkZ2UgaGVscGVyIOKAlCByb2RhIG5vIG5vZGUgcmVtb3RvIHZpYSBTU0guCiMgVXNvOiBweXRob24zIHJlbW90ZS1icmlkZ2UucHkgPHNlc3Npb25JZD4gPG1vZGU+IFthcmdzLi4uXQojIG1vZGU6IGNvdW50IHwgbWVzc2FnZXMgfCBwb2xsCiMgICBjb3VudDoge2NvdW50fQojICAgbWVzc2FnZXMgW2xpbWl0XToge2RhdGEsIGN1cnNvcn0KIyAgIHBvbGwgPGxhc3RNc2dSb3dpZD4gPGxhc3RQYXJ0Um93aWQ+OiB7bmV3TXNncywgbmV3UGFydHN9CmltcG9ydCBqc29uLCBvcywgc3FsaXRlMywgc3lzCgpzZXNzaW9uX2lkID0gc3lzLmFyZ3ZbMV0KbW9kZSA9IHN5cy5hcmd2WzJdIGlmIGxlbihzeXMuYXJndikgPiAyIGVsc2UgJ2NvdW50JwoKZGJfcGF0aCA9IG9zLmVudmlyb24uZ2V0KCdPUEVOQ09ERV9EQicpIG9yIG9zLnBhdGguZXhwYW5kdXNlcignfi8ubG9jYWwvc2hhcmUvb3BlbmNvZGUvb3BlbmNvZGUuZGInKQoKdHJ5OgogICAgZGIgPSBzcWxpdGUzLmNvbm5lY3QoZidmaWxlOntkYl9wYXRofT9tb2RlPXJvJywgdXJpPVRydWUpCiAgICBkYi5yb3dfZmFjdG9yeSA9IHNxbGl0ZTMuUm93CiAgICBkYi5leGVjdXRlKCdQUkFHTUEgYnVzeV90aW1lb3V0ID0gMzAwMCcpCmV4Y2VwdCBFeGNlcHRpb24gYXMgZToKICAgIHByaW50KGpzb24uZHVtcHMoeydlcnJvcic6ICdkYl9vcGVuX2ZhaWxlZCcsICdtZXNzYWdlJzogc3RyKGUpfSkpCiAgICBzeXMuZXhpdCgwKQoKZGVmIGJ1aWxkX2JyaWRnZV9tZXNzYWdlKHJvdyk6CiAgICB0cnk6CiAgICAgICAgbWRhdGEgPSBqc29uLmxvYWRzKHJvd1snZGF0YSddIG9yICd7fScpCiAgICBleGNlcHQgRXhjZXB0aW9uOgogICAgICAgIG1kYXRhID0ge30KICAgIHJvbGUgPSBtZGF0YS5nZXQoJ3JvbGUnLCAndXNlcicpCiAgICBwYXJ0cyA9IFtdCiAgICB0cnk6CiAgICAgICAgY3VyID0gZGIuZXhlY3V0ZSgnU0VMRUNUIGlkLCBkYXRhLCB0aW1lX2NyZWF0ZWQsIHRpbWVfdXBkYXRlZCBGUk9NIHBhcnQgV0hFUkUgbWVzc2FnZV9pZCA9ID8gT1JERVIgQlkgcm93aWQgQVNDJywgKHJvd1snaWQnXSwpKQogICAgICAgIGZvciBwIGluIGN1ci5mZXRjaGFsbCgpOgogICAgICAgICAgICB0cnk6CiAgICAgICAgICAgICAgICBwZCA9IGpzb24ubG9hZHMocFsnZGF0YSddIG9yICd7fScpCiAgICAgICAgICAgIGV4Y2VwdCBFeGNlcHRpb246CiAgICAgICAgICAgICAgICBwZCA9IHt9CiAgICAgICAgICAgIHBhcnRzLmFwcGVuZCh7J2lkJzogcFsnaWQnXSwgJ3RpbWVfY3JlYXRlZCc6IHBbJ3RpbWVfY3JlYXRlZCddLCAndGltZV91cGRhdGVkJzogcFsndGltZV91cGRhdGVkJ10sICdkYXRhJzogcGR9KQogICAgZXhjZXB0IEV4Y2VwdGlvbjoKICAgICAgICBwYXNzCiAgICBiYXNlID0geydpZCc6IHJvd1snaWQnXSwgJ3RpbWUnOiB7J2NyZWF0ZWQnOiBtZGF0YS5nZXQoJ3RpbWUnLCB7fSkuZ2V0KCdjcmVhdGVkJykgb3Igcm93Wyd0aW1lX2NyZWF0ZWQnXX19CiAgICBpZiByb2xlID09ICd1c2VyJzoKICAgICAgICB0ZXh0X3BhcnQgPSBuZXh0KChwIGZvciBwIGluIHBhcnRzIGlmIHBbJ2RhdGEnXS5nZXQoJ3R5cGUnKSA9PSAndGV4dCcpLCBOb25lKQogICAgICAgIHJldHVybiB7KipiYXNlLCAndHlwZSc6ICd1c2VyJywgJ3RleHQnOiB0ZXh0X3BhcnRbJ2RhdGEnXS5nZXQoJ3RleHQnLCAnJykgaWYgdGV4dF9wYXJ0IGVsc2UgJyd9CiAgICBjb250ZW50ID0gW10KICAgIGZpbmlzaCA9IE5vbmUKICAgIGNvc3QgPSAwCiAgICB0b2tlbnMgPSBOb25lCiAgICBoYXNfc3RlcF9maW5pc2ggPSBGYWxzZQogICAgbGFzdF91cGRhdGVkID0gcm93Wyd0aW1lX3VwZGF0ZWQnXSBvciByb3dbJ3RpbWVfY3JlYXRlZCddCiAgICBlcnJvciA9IE5vbmUKICAgIGlmIG1kYXRhLmdldCgnZXJyb3InKToKICAgICAgICBlZCA9IG1kYXRhWydlcnJvciddLmdldCgnZGF0YScsIHt9KSBvciB7fQogICAgICAgIGVycm9yID0geyduYW1lJzogbWRhdGFbJ2Vycm9yJ10uZ2V0KCduYW1lJywgJ0Vycm9yJyksICdtZXNzYWdlJzogZWQuZ2V0KCdtZXNzYWdlJywgJ2Vycm8gZGVzY29uaGVjaWRvJyksICdzdGF0dXNDb2RlJzogZWQuZ2V0KCdzdGF0dXNDb2RlJyl9CiAgICBmb3IgcCBpbiBwYXJ0czoKICAgICAgICBkID0gcFsnZGF0YSddCiAgICAgICAgdCA9IGQuZ2V0KCd0eXBlJykKICAgICAgICBpZiB0IGluICgncmVhc29uaW5nJywgJ3RleHQnKToKICAgICAgICAgICAgY29udGVudC5hcHBlbmQoeyd0eXBlJzogdCwgJ3RleHQnOiBkLmdldCgndGV4dCcsICcnKX0pCiAgICAgICAgICAgIGlmIHBbJ3RpbWVfdXBkYXRlZCddID4gbGFzdF91cGRhdGVkOgogICAgICAgICAgICAgICAgbGFzdF91cGRhdGVkID0gcFsndGltZV91cGRhdGVkJ10KICAgICAgICBlbGlmIHQgPT0gJ3Rvb2wnOgogICAgICAgICAgICBjb250ZW50LmFwcGVuZCh7J3R5cGUnOiAndG9vbCcsICduYW1lJzogZC5nZXQoJ3Rvb2wnLCAndG9vbCcpLCAnY2FsbElEJzogZC5nZXQoJ2NhbGxJRCcpLCAnc3RhdGUnOiBkLmdldCgnc3RhdGUnLCB7fSl9KQogICAgICAgICAgICBpZiBwWyd0aW1lX3VwZGF0ZWQnXSA+IGxhc3RfdXBkYXRlZDoKICAgICAgICAgICAgICAgIGxhc3RfdXBkYXRlZCA9IHBbJ3RpbWVfdXBkYXRlZCddCiAgICAgICAgZWxpZiB0ID09ICdzdGVwLWZpbmlzaCc6CiAgICAgICAgICAgIGhhc19zdGVwX2ZpbmlzaCA9IFRydWUKICAgICAgICAgICAgaWYgZC5nZXQoJ3JlYXNvbicpOgogICAgICAgICAgICAgICAgZmluaXNoID0gZFsncmVhc29uJ10KICAgICAgICAgICAgaWYgZC5nZXQoJ2Nvc3QnKSBpcyBub3QgTm9uZToKICAgICAgICAgICAgICAgIGNvc3QgPSBkWydjb3N0J10KICAgICAgICAgICAgaWYgZC5nZXQoJ3Rva2VucycpOgogICAgICAgICAgICAgICAgdG9rZW5zID0gZFsndG9rZW5zJ10KICAgICAgICAgICAgaWYgcFsndGltZV91cGRhdGVkJ10gPiBsYXN0X3VwZGF0ZWQ6CiAgICAgICAgICAgICAgICBsYXN0X3VwZGF0ZWQgPSBwWyd0aW1lX3VwZGF0ZWQnXQogICAgbW9kZWwgPSBOb25lCiAgICBpZiBtZGF0YS5nZXQoJ21vZGVsSUQnKSBvciBtZGF0YS5nZXQoJ21vZGVsJyk6CiAgICAgICAgbSA9IG1kYXRhLmdldCgnbW9kZWwnLCB7fSkgb3Ige30KICAgICAgICBtb2RlbCA9IHsnaWQnOiBtZGF0YS5nZXQoJ21vZGVsSUQnKSBvciBtLmdldCgnbW9kZWxJRCcpIG9yIG0uZ2V0KCdpZCcpIG9yICd1bmtub3duJywgJ3Byb3ZpZGVySUQnOiBtLmdldCgncHJvdmlkZXJJRCcsICdvcGVuY29kZScpLCAndmFyaWFudCc6IG0uZ2V0KCd2YXJpYW50JywgJ2RlZmF1bHQnKX0KICAgIHJldHVybiB7KipiYXNlLCAndGltZSc6IHsqKmJhc2VbJ3RpbWUnXSwgJ2NvbXBsZXRlZCc6IGxhc3RfdXBkYXRlZH0sICd0eXBlJzogJ2Fzc2lzdGFudCcsICdpblByb2dyZXNzJzogKG5vdCBoYXNfc3RlcF9maW5pc2gpIGFuZCAobm90IGVycm9yKSwgJ2FnZW50JzogbWRhdGEuZ2V0KCdhZ2VudCcpLCAnbW9kZWwnOiBtb2RlbCwgJ2ZpbmlzaCc6IGZpbmlzaCBvciBtZGF0YS5nZXQoJ2ZpbmlzaCcsICdzdG9wJyksICdjb3N0JzogbWRhdGEuZ2V0KCdjb3N0JykgaWYgbWRhdGEuZ2V0KCdjb3N0JykgaXMgbm90IE5vbmUgZWxzZSBjb3N0LCAndG9rZW5zJzogbWRhdGEuZ2V0KCd0b2tlbnMnKSBvciB0b2tlbnMsICdjb250ZW50JzogY29udGVudCwgJ2Vycm9yJzogZXJyb3J9Cgp0cnk6CiAgICBpZiBtb2RlID09ICdjb3VudCc6CiAgICAgICAgciA9IGRiLmV4ZWN1dGUoJ1NFTEVDVCBDT1VOVCgqKSBBUyBjIEZST00gbWVzc2FnZSBXSEVSRSBzZXNzaW9uX2lkID0gPycsIChzZXNzaW9uX2lkLCkpLmZldGNob25lKCkKICAgICAgICBwcmludChqc29uLmR1bXBzKHsnY291bnQnOiByWydjJ10gaWYgciBlbHNlIDB9KSkKICAgIGVsaWYgbW9kZSA9PSAnbWVzc2FnZXMnOgogICAgICAgIGxpbWl0ID0gaW50KHN5cy5hcmd2WzNdKSBpZiBsZW4oc3lzLmFyZ3YpID4gMyBlbHNlIDEwMAogICAgICAgIGxpbSA9IG1heCgxLCBtaW4obGltaXQsIDUwMCkpCiAgICAgICAgcm93cyA9IGRiLmV4ZWN1dGUoJ1NFTEVDVCBpZCwgZGF0YSwgdGltZV9jcmVhdGVkLCB0aW1lX3VwZGF0ZWQgRlJPTSBtZXNzYWdlIFdIRVJFIHNlc3Npb25faWQgPSA/IE9SREVSIEJZIHJvd2lkIERFU0MgTElNSVQgPycsIChzZXNzaW9uX2lkLCBsaW0pKS5mZXRjaGFsbCgpCiAgICAgICAgZGF0YSA9IFtidWlsZF9icmlkZ2VfbWVzc2FnZShyKSBmb3IgciBpbiByb3dzXQogICAgICAgIHByaW50KGpzb24uZHVtcHMoeydkYXRhJzogZGF0YSwgJ2N1cnNvcic6IHsncHJldmlvdXMnOiBOb25lLCAnbmV4dCc6IE5vbmV9fSkpCiAgICBlbGlmIG1vZGUgPT0gJ3BvbGwnOgogICAgICAgIGxhc3RfbXNnX3Jvd2lkID0gaW50KHN5cy5hcmd2WzNdKSBpZiBsZW4oc3lzLmFyZ3YpID4gMyBlbHNlIDAKICAgICAgICBsYXN0X3BhcnRfcm93aWQgPSBpbnQoc3lzLmFyZ3ZbNF0pIGlmIGxlbihzeXMuYXJndikgPiA0IGVsc2UgMAogICAgICAgIG5ld19tc2dzID0gW10KICAgICAgICB0cnk6CiAgICAgICAgICAgIGN1ciA9IGRiLmV4ZWN1dGUoIlNFTEVDVCBpZCwgcm93aWQsIGRhdGEgRlJPTSBtZXNzYWdlIFdIRVJFIHNlc3Npb25faWQgPSA/IEFORCByb3dpZCA+ID8gQU5EIGpzb25fZXh0cmFjdChkYXRhLCAnJC5yb2xlJykgPSAndXNlcicgT1JERVIgQlkgcm93aWQgQVNDIiwgKHNlc3Npb25faWQsIGxhc3RfbXNnX3Jvd2lkKSkKICAgICAgICAgICAgZm9yIG0gaW4gY3VyLmZldGNoYWxsKCk6CiAgICAgICAgICAgICAgICB0ZXh0ID0gJycKICAgICAgICAgICAgICAgIHRyeToKICAgICAgICAgICAgICAgICAgICB0cCA9IGRiLmV4ZWN1dGUoIlNFTEVDVCBkYXRhIEZST00gcGFydCBXSEVSRSBtZXNzYWdlX2lkID0gPyBBTkQganNvbl9leHRyYWN0KGRhdGEsICckLnR5cGUnKSA9ICd0ZXh0JyBPUkRFUiBCWSByb3dpZCBBU0MgTElNSVQgMSIsIChtWydpZCddLCkpLmZldGNob25lKCkKICAgICAgICAgICAgICAgICAgICBpZiB0cDoKICAgICAgICAgICAgICAgICAgICAgICAgdGV4dCA9IGpzb24ubG9hZHModHBbJ2RhdGEnXSBvciAne30nKS5nZXQoJ3RleHQnLCAnJykKICAgICAgICAgICAgICAgIGV4Y2VwdCBFeGNlcHRpb246CiAgICAgICAgICAgICAgICAgICAgcGFzcwogICAgICAgICAgICAgICAgbmV3X21zZ3MuYXBwZW5kKHsnaWQnOiBtWydpZCddLCAncm93aWQnOiBtWydyb3dpZCddLCAndGV4dCc6IHRleHR9KQogICAgICAgIGV4Y2VwdCBFeGNlcHRpb246CiAgICAgICAgICAgIHBhc3MKICAgICAgICBuZXdfcGFydHMgPSBbXQogICAgICAgIHRyeToKICAgICAgICAgICAgY3VyID0gZGIuZXhlY3V0ZSgnU0VMRUNUIGlkLCByb3dpZCwgbWVzc2FnZV9pZCwgZGF0YSwgdGltZV9jcmVhdGVkLCB0aW1lX3VwZGF0ZWQgRlJPTSBwYXJ0IFdIRVJFIHNlc3Npb25faWQgPSA/IEFORCByb3dpZCA+ID8gT1JERVIgQlkgcm93aWQgQVNDJywgKHNlc3Npb25faWQsIGxhc3RfcGFydF9yb3dpZCkpCiAgICAgICAgICAgIGZvciBwIGluIGN1ci5mZXRjaGFsbCgpOgogICAgICAgICAgICAgICAgdHJ5OgogICAgICAgICAgICAgICAgICAgIHBkID0ganNvbi5sb2FkcyhwWydkYXRhJ10gb3IgJ3t9JykKICAgICAgICAgICAgICAgIGV4Y2VwdCBFeGNlcHRpb246CiAgICAgICAgICAgICAgICAgICAgcGQgPSB7fQogICAgICAgICAgICAgICAgbmV3X3BhcnRzLmFwcGVuZCh7J2lkJzogcFsnaWQnXSwgJ3Jvd2lkJzogcFsncm93aWQnXSwgJ21lc3NhZ2VfaWQnOiBwWydtZXNzYWdlX2lkJ10sICdkYXRhJzogcGQsICd0aW1lX2NyZWF0ZWQnOiBwWyd0aW1lX2NyZWF0ZWQnXSwgJ3RpbWVfdXBkYXRlZCc6IHBbJ3RpbWVfdXBkYXRlZCddfSkKICAgICAgICBleGNlcHQgRXhjZXB0aW9uOgogICAgICAgICAgICBwYXNzCiAgICAgICAgcHJpbnQoanNvbi5kdW1wcyh7J25ld01zZ3MnOiBuZXdfbXNncywgJ25ld1BhcnRzJzogbmV3X3BhcnRzfSkpCiAgICBlbHNlOgogICAgICAgIHByaW50KGpzb24uZHVtcHMoeydlcnJvcic6ICd1bmtub3duX21vZGUnLCAnbW9kZSc6IG1vZGV9KSkKZXhjZXB0IEV4Y2VwdGlvbiBhcyBlOgogICAgcHJpbnQoanNvbi5kdW1wcyh7J2Vycm9yJzogJ3F1ZXJ5X2ZhaWxlZCcsICdtZXNzYWdlJzogc3RyKGUpfSkpCg==';
+
+function remoteBridgeQuery(node, sessionId, mode, limit) {
+  return new Promise((resolve) => {
+    if (!process.env.SSH_BIN || !node || !node.ssh) return resolve(null);
+    const { execFile } = require('child_process');
+    const ident = process.env.SSH_IDENTITY || `${os.homedir()}/.ssh/id_ed25519_ospos`;
+    const script = Buffer.from(REMOTE_BRIDGE_SCRIPT_B64, 'base64').toString('utf8');
+    // escreve o script em /tmp no remoto e roda — evita escaping de SQL no shell
+    const cmd = `cat > /tmp/remote-bridge.py << 'PYEOF'\n${script}\nPYEOF\npython3 /tmp/remote-bridge.py ${JSON.stringify(sessionId)} ${mode} ${limit || 100}`;
+    execFile('/bin/sh', ['-c', `${process.env.SSH_BIN} -i ${ident} -o BatchMode=yes -o ConnectTimeout=6 ${node.ssh} '${cmd.replace(/'/g, "'\\''")}'`], { timeout: 15000, maxBuffer: 64 * 1024 * 1024 }, (err, stdout) => {
+      if (err) { logger.warn('bridge.remote_failed', { node: node.id, error: err.message }); return resolve(null); }
+      try { resolve(JSON.parse(stdout)); }
+      catch (_) { logger.warn('bridge.remote_parse_failed', { node: node.id }); resolve(null); }
+    });
+  });
+}
+
+// Quantas mensagens a sessão tem no SQLite (para decidir se sintetizamos).
+// Node-aware: node remoto consulta o DB dele via SSH.
+async function bridgeHasMessages(sessionId, node) {
+  if (node && node.id !== 'main') {
+    const r = await remoteBridgeQuery(node, sessionId, 'count', 1);
+    return !!(r && r.count > 0);
+  }
+  const d = openDb();
   if (!d) return false;
   try {
     const r = d.prepare('SELECT COUNT(*) AS c FROM message WHERE session_id = ?').get(sessionId);
@@ -542,8 +568,14 @@ function buildBridgeMessage(mrow) {
   };
 }
 
-// Sintetiza /api/session/{id}/message (mesmo shape: {data, cursor}, DESC)
-function bridgeMessages(sessionId, limit) {
+// Sintetiza /api/session/{id}/message (mesmo shape: {data, cursor}, DESC).
+// Node-aware: node remoto consulta o DB dele via SSH.
+async function bridgeMessages(sessionId, limit, node) {
+  if (node && node.id !== 'main') {
+    const r = await remoteBridgeQuery(node, sessionId, 'messages', limit || 100);
+    if (r && Array.isArray(r.data)) return r;
+    return null;
+  }
   const d = openDb();
   if (!d) return null;
   const lim = Math.min(Math.max(limit || 100, 1), 500);
@@ -781,9 +813,10 @@ function proxySessionsSorted(req, res) {
 // polling da tabela part (novos/atualizados) + novos user messages
 // -> eventos no MESMO formato que o serve emite.
 // ============================================================
-function bridgeSSE(req, res, sessionId) {
-  const d = openDb();
-  if (!d) {
+function bridgeSSE(req, res, sessionId, node) {
+  const isRemote = !!(node && node.id !== 'main');
+  const d = isRemote ? null : openDb();
+  if (!isRemote && !d) {
     res.writeHead(502, { 'Content-Type': 'application/json' });
     return res.end(JSON.stringify({ error: 'bridge: sqlite indisponível' }));
   }
@@ -796,20 +829,24 @@ function bridgeSSE(req, res, sessionId) {
   });
 
   let seq = 0;
-  try {
-    const r = d.prepare('SELECT MAX(seq) AS s FROM event WHERE aggregate_id = ?').get(sessionId);
-    seq = (r && r.s) || 0;
-  } catch (_) {}
+  if (!isRemote) {
+    try {
+      const r = d.prepare('SELECT MAX(seq) AS s FROM event WHERE aggregate_id = ?').get(sessionId);
+      seq = (r && r.s) || 0;
+    } catch (_) {}
+  }
 
   // watermark: só eventos NOVOS (rowid > último visto na conexão)
   let lastMsgRowid = 0;
   let lastPartRowid = 0;
-  try {
-    const rm = d.prepare('SELECT MAX(rowid) AS r FROM message WHERE session_id = ?').get(sessionId);
-    lastMsgRowid = (rm && rm.r) || 0;
-    const rp = d.prepare('SELECT MAX(rowid) AS r FROM part WHERE session_id = ?').get(sessionId);
-    lastPartRowid = (rp && rp.r) || 0;
-  } catch (_) {}
+  if (!isRemote) {
+    try {
+      const rm = d.prepare('SELECT MAX(rowid) AS r FROM message WHERE session_id = ?').get(sessionId);
+      lastMsgRowid = (rm && rm.r) || 0;
+      const rp = d.prepare('SELECT MAX(rowid) AS r FROM part WHERE session_id = ?').get(sessionId);
+      lastPartRowid = (rp && rp.r) || 0;
+    } catch (_) {}
+  }
 
   // estado por part: para emitir started/ended sem repetir
   const partState = new Map(); // partId -> {started, ended}
@@ -828,25 +865,41 @@ function bridgeSSE(req, res, sessionId) {
 
   const now = () => Date.now();
 
-  const poll = () => {
+  const poll = async () => {
     // 1. Novas mensagens do usuário -> session.next.prompted
     let newMsgs = [];
-    try {
-      newMsgs = d.prepare(
-        "SELECT id, rowid, data FROM message WHERE session_id = ? AND rowid > ? AND json_extract(data, '$.role') = 'user' ORDER BY rowid ASC"
-      ).all(sessionId, lastMsgRowid);
-    } catch (_) {}
+    let newParts = [];
+    if (isRemote) {
+      const r = await remoteBridgeQuery(node, sessionId, 'poll', lastMsgRowid, lastPartRowid);
+      if (r) {
+        newMsgs = r.newMsgs || [];
+        newParts = r.newParts || [];
+      }
+    } else {
+      try {
+        newMsgs = d.prepare(
+          "SELECT id, rowid, data FROM message WHERE session_id = ? AND rowid > ? AND json_extract(data, '$.role') = 'user' ORDER BY rowid ASC"
+        ).all(sessionId, lastMsgRowid);
+      } catch (_) {}
+      try {
+        newParts = d.prepare(
+          'SELECT id, rowid, message_id, data, time_created, time_updated FROM part WHERE session_id = ? AND rowid > ? ORDER BY rowid ASC'
+        ).all(sessionId, lastPartRowid);
+      } catch (_) {}
+    }
     for (const m of newMsgs) {
       if (m.rowid > lastMsgRowid) lastMsgRowid = m.rowid;
       if (msgState.has(m.id)) continue;
       msgState.set(m.id, true);
-      let text = '';
-      try {
-        const tp = d.prepare(
-          "SELECT data FROM part WHERE message_id = ? AND json_extract(data, '$.type') = 'text' ORDER BY rowid ASC LIMIT 1"
-        ).get(m.id);
-        if (tp) { try { text = JSON.parse(tp.data).text || ''; } catch (_) {} }
-      } catch (_) {}
+      let text = m.text || '';
+      if (!isRemote && !text) {
+        try {
+          const tp = d.prepare(
+            "SELECT data FROM part WHERE message_id = ? AND json_extract(data, '$.type') = 'text' ORDER BY rowid ASC LIMIT 1"
+          ).get(m.id);
+          if (tp) { try { text = JSON.parse(tp.data).text || ''; } catch (_) {} }
+        } catch (_) {}
+      }
       send('session.next.prompted', {
         timestamp: now(), sessionID: sessionId, messageID: m.id,
         prompt: { text }, delivery: 'bridge'
@@ -854,13 +907,6 @@ function bridgeSSE(req, res, sessionId) {
     }
 
     // 2. Parts novas/atualizadas -> eventos de step/reasoning/text/tool
-    let newParts = [];
-    try {
-      newParts = d.prepare(
-        'SELECT id, rowid, message_id, data, time_created, time_updated FROM part WHERE session_id = ? AND rowid > ? ORDER BY rowid ASC'
-      ).all(sessionId, lastPartRowid);
-    } catch (_) {}
-
     for (const p of newParts) {
       if (p.rowid > lastPartRowid) lastPartRowid = p.rowid;
       let pd = {};
@@ -869,21 +915,23 @@ function bridgeSSE(req, res, sessionId) {
 
       if (pd.type === 'step-start' && !st.started) {
         st.started = true;
-        // agent/model vêm da message dona do step
+        // agent/model vêm da message dona do step (só no bridge local)
         let agent = null, model = null;
-        try {
-          const mrow = d.prepare('SELECT data FROM message WHERE id = ?').get(p.message_id);
-          if (mrow) {
-            const md = JSON.parse(mrow.data || '{}');
-            agent = md.agent || null;
-            const m = md.model || {};
-            model = {
-              id: md.modelID || m.modelID || m.id || 'unknown',
-              providerID: m.providerID || 'opencode',
-              variant: m.variant || 'default'
-            };
-          }
-        } catch (_) {}
+        if (!isRemote) {
+          try {
+            const mrow = d.prepare('SELECT data FROM message WHERE id = ?').get(p.message_id);
+            if (mrow) {
+              const md = JSON.parse(mrow.data || '{}');
+              agent = md.agent || null;
+              const m = md.model || {};
+              model = {
+                id: md.modelID || m.modelID || m.id || 'unknown',
+                providerID: m.providerID || 'opencode',
+                variant: m.variant || 'default'
+              };
+            }
+          } catch (_) {}
+        }
         send('session.next.step.started', {
           timestamp: now(), sessionID: sessionId, assistantMessageID: p.message_id,
           agent, model
@@ -970,7 +1018,7 @@ function bridgeSSE(req, res, sessionId) {
   };
 
   poll();
-  const timer = setInterval(poll, 500);
+  const timer = setInterval(poll, isRemote ? 2000 : 500);
   req.on('close', () => {
     clearInterval(timer);
     res.end();
@@ -1451,9 +1499,9 @@ const requestHandler = async (req, res) => {
   if (method === 'GET' && msgMatch) {
     const sessionId = decodeURIComponent(msgMatch[1]);
     const node = await findSessionNode(sessionId);
-    if (bridgeHasMessages(sessionId)) {
+    if (await bridgeHasMessages(sessionId, node)) {
       const limit = parseInt(new URL(req.url, 'http://x').searchParams.get('limit') || '100', 10);
-      const synth = bridgeMessages(sessionId, limit);
+      const synth = await bridgeMessages(sessionId, limit, node);
       if (synth) {
         logger.info('bridge.message_synthesized', { sessionId: sessionId.slice(0, 12), count: synth.data.length, node: node ? node.id : 'main' });
         res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
@@ -1468,9 +1516,9 @@ const requestHandler = async (req, res) => {
   if (method === 'GET' && evtMatch) {
     const sessionId = decodeURIComponent(evtMatch[1]);
     const node = await findSessionNode(sessionId);
-    if (bridgeHasMessages(sessionId)) {
+    if (await bridgeHasMessages(sessionId, node)) {
       logger.info('bridge.sse_synthesized', { sessionId: sessionId.slice(0, 12), node: node ? node.id : 'main' });
-      return bridgeSSE(req, res, sessionId);
+      return bridgeSSE(req, res, sessionId, node);
     }
     if (!node) return replySessionMiss(res, 404, 'sessão não encontrada em nenhum node');
     return proxyApi(req, res, node);
@@ -1710,6 +1758,16 @@ const requestHandler = async (req, res) => {
       urlPath === '/permission' || urlPath.startsWith('/permission/') ||
       urlPath === '/question' || urlPath.startsWith('/question/') ||
       urlPath.startsWith('/api/') || urlPath.startsWith('/config')) {
+    // GET /session/:id — roteia para o node dono (senão cai no main e dá 404
+    // para sessões TUI de nodes remotos como lubuntu).
+    if (method === 'GET') {
+      const sessMatch = urlPath.match(/^\/session\/([^/]+)$/);
+      if (sessMatch) {
+        const sid = decodeURIComponent(sessMatch[1]);
+        const node = await findSessionNode(sid);
+        if (node) return proxyApi(req, res, node);
+      }
+    }
     logger.debug('proxy.request', { method, path: urlPath });
     return proxyApi(req, res);
   }
